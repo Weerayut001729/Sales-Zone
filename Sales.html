@@ -1,0 +1,618 @@
+import React, { useState, useEffect, useCallback } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, doc, setDoc, collection, query, onSnapshot, orderBy, where } from 'firebase/firestore';
+import { BarChart, Bar, LineChart, Line, PieChart, Pie, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, Cell } from 'recharts';
+
+// Firebase configuration and initialization
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+const auth = getAuth(app);
+
+// Global variables for app ID and initial auth token
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+// Branch data
+const branches = ['ARI', 'ZPL', 'ICS', 'SLC', 'EMQ'];
+
+// Color palette for charts
+const COLORS = ['#8884d8', '#82ca9d', '#ffc658', '#ff8042', '#0088FE', '#00C49F', '#FFBB28', '#FF8042'];
+
+// Main App Component
+const App = () => {
+    const [activeTab, setActiveTab] = useState('branches'); // State to manage active tab
+    const [userId, setUserId] = useState(null); // State to store user ID
+    const [salesData, setSalesData] = useState([]); // State to store all sales data
+    const [loading, setLoading] = useState(true); // Loading state for data fetching
+    const [error, setError] = useState(null); // Error state
+
+    // Authenticate user and set up Firestore listener
+    useEffect(() => {
+        const authenticate = async () => {
+            try {
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (err) {
+                console.error("Firebase authentication error:", err);
+                setError("Failed to authenticate. Please try again.");
+            }
+        };
+
+        const unsubscribeAuth = onAuthStateChanged(auth, (user) => {
+            if (user) {
+                setUserId(user.uid);
+                console.log("User authenticated:", user.uid);
+            } else {
+                setUserId(null);
+                console.log("No user signed in.");
+            }
+            setLoading(false); // Authentication check complete
+        });
+
+        authenticate();
+
+        // Cleanup function for auth listener
+        return () => unsubscribeAuth();
+    }, []); // Run once on component mount
+
+    // Fetch sales data from Firestore
+    useEffect(() => {
+        if (!userId) return; // Wait for userId to be available
+
+        const salesCollectionRef = collection(db, `artifacts/${appId}/users/${userId}/salesData`);
+        const q = query(salesCollectionRef, orderBy('date', 'desc')); // Order by date descending
+
+        const unsubscribeSnapshot = onSnapshot(q, (snapshot) => {
+            const data = snapshot.docs.map(doc => ({
+                id: doc.id,
+                ...doc.data(),
+                date: doc.data().date.toDate(), // Convert Firestore Timestamp to Date object
+            }));
+            setSalesData(data);
+            setLoading(false);
+        }, (err) => {
+            console.error("Firestore data fetch error:", err);
+            setError("Failed to load sales data. Please check your connection.");
+            setLoading(false);
+        });
+
+        // Cleanup function for snapshot listener
+        return () => unsubscribeSnapshot();
+    }, [userId]); // Re-run when userId changes
+
+    if (loading) {
+        return (
+            <div className="flex items-center justify-center min-h-screen bg-gray-100">
+                <div className="text-lg font-semibold text-gray-700">Loading Sales By Zone Mai...</div>
+            </div>
+        );
+    }
+
+    if (error) {
+        return (
+            <div className="flex items-center justify-center min-h-screen bg-red-100 text-red-700 p-4 rounded-lg">
+                Error: {error}
+            </div>
+        );
+    }
+
+    return (
+        <div className="min-h-screen bg-gray-50 font-inter">
+            {/* Header */}
+            <header className="bg-white shadow-sm p-4 flex items-center justify-between sticky top-0 z-10">
+                <h1 className="text-2xl font-bold text-gray-800">Sales By Zone Mai</h1>
+                {userId && (
+                    <div className="text-sm text-gray-600">User ID: <span className="font-mono text-blue-600">{userId}</span></div>
+                )}
+            </header>
+
+            {/* Navigation Tabs */}
+            <nav className="bg-white shadow-md sticky top-16 z-10">
+                <div className="flex justify-around border-b border-gray-200">
+                    <TabButton
+                        label="ข้อมูลสาขา"
+                        active={activeTab === 'branches'}
+                        onClick={() => setActiveTab('branches')}
+                    />
+                    <TabButton
+                        label="ลงข้อมูลยอดขาย"
+                        active={activeTab === 'salesEntry'}
+                        onClick={() => setActiveTab('salesEntry')}
+                    />
+                    <TabButton
+                        label="สรุปยอดขาย"
+                        active={activeTab === 'monthlySummary'}
+                        onClick={() => setActiveTab('monthlySummary')}
+                    />
+                </div>
+            </nav>
+
+            {/* Main Content Area */}
+            <main className="p-4 max-w-4xl mx-auto">
+                {activeTab === 'branches' && <BranchInfo />}
+                {activeTab === 'salesEntry' && <SalesEntry userId={userId} appId={appId} db={db} />}
+                {activeTab === 'monthlySummary' && <SalesSummary salesData={salesData} />}
+            </main>
+        </div>
+    );
+};
+
+// Tab Button Component
+const TabButton = ({ label, active, onClick }) => (
+    <button
+        className={`flex-1 py-3 px-4 text-center text-sm font-semibold transition-colors duration-200 ease-in-out
+            ${active ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-600 hover:text-gray-800'}`}
+        onClick={onClick}
+    >
+        {label}
+    </button>
+);
+
+// Branch Information Component
+const BranchInfo = () => {
+    return (
+        <div className="p-6 bg-white rounded-lg shadow-md mt-4">
+            <h2 className="text-xl font-bold text-gray-800 mb-6">ข้อมูลสาขา</h2>
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+                {branches.map((branch, index) => (
+                    <div
+                        key={index}
+                        className="bg-gradient-to-br from-blue-100 to-indigo-100 p-5 rounded-xl shadow-sm hover:shadow-md transition-shadow duration-200 cursor-pointer flex items-center justify-center"
+                    >
+                        <span className="text-lg font-semibold text-blue-700">{branch}</span>
+                    </div>
+                ))}
+            </div>
+            <p className="mt-6 text-gray-600 text-sm">
+                หน้านี้แสดงรายชื่อสาขาหลักทั้งหมดของ "Sales By Zone Mai"
+            </p>
+        </div>
+    );
+};
+
+// Sales Entry Component
+const SalesEntry = ({ userId, appId, db }) => {
+    const today = new Date();
+    const formattedToday = today.toISOString().split('T')[0]; // YYYY-MM-DD
+
+    const [date, setDate] = useState(formattedToday);
+    const [branch, setBranch] = useState(branches[0]);
+    const [targetSales, setTargetSales] = useState('');
+    const [inStoreSales, setInStoreSales] = useState('');
+    const [taSales, setTaSales] = useState('');
+    const [grabSales, setGrabSales] = useState('');
+    const [lineManSales, setLineManSales] = useState('');
+    const [numBills, setNumBills] = useState('');
+    const [numCustomers, setNumCustomers] = useState('');
+    const [targetEverestPerBill, setTargetEverestPerBill] = useState('');
+    const [targetEverestPerHead, setTargetEverestPerHead] = useState('');
+    const [message, setMessage] = useState({ type: '', text: '' }); // For success/error messages
+
+    // Calculated values
+    const totalSales = (parseFloat(inStoreSales) || 0) + (parseFloat(taSales) || 0) + (parseFloat(grabSales) || 0) + (parseFloat(lineManSales) || 0);
+    const salesDifference = totalSales - (parseFloat(targetSales) || 0);
+    const salesPercentage = (parseFloat(targetSales) || 0) !== 0 ? (salesDifference / (parseFloat(targetSales) || 0)) * 100 : 0;
+
+    const everestPerBill = (parseFloat(numBills) || 0) !== 0 ? totalSales / (parseFloat(numBills) || 0) : 0;
+    const everestPerBillDifference = everestPerBill - (parseFloat(targetEverestPerBill) || 0);
+    const everestPerBillPercentage = (parseFloat(targetEverestPerBill) || 0) !== 0 ? (everestPerBillDifference / (parseFloat(targetEverestPerBill) || 0)) * 100 : 0;
+
+    const everestPerHead = (parseFloat(numCustomers) || 0) !== 0 ? totalSales / (parseFloat(numCustomers) || 0) : 0;
+    const everestPerHeadDifference = everestPerHead - (parseFloat(targetEverestPerHead) || 0);
+    const everestPerHeadPercentage = (parseFloat(targetEverestPerHead) || 0) !== 0 ? (everestPerHeadDifference / (parseFloat(targetEverestPerHead) || 0)) * 100 : 0;
+
+    // Function to save data to Firestore
+    const handleSave = async (e) => {
+        e.preventDefault();
+        if (!userId) {
+            setMessage({ type: 'error', text: 'User not authenticated. Please refresh.' });
+            return;
+        }
+
+        try {
+            const docRef = doc(db, `artifacts/${appId}/users/${userId}/salesData`, `${branch}-${date}`);
+            await setDoc(docRef, {
+                date: new Date(date), // Store as Firestore Timestamp
+                branch,
+                targetSales: parseFloat(targetSales) || 0,
+                inStoreSales: parseFloat(inStoreSales) || 0,
+                taSales: parseFloat(taSales) || 0,
+                grabSales: parseFloat(grabSales) || 0,
+                lineManSales: parseFloat(lineManSales) || 0,
+                numBills: parseFloat(numBills) || 0,
+                numCustomers: parseFloat(numCustomers) || 0,
+                targetEverestPerBill: parseFloat(targetEverestPerBill) || 0,
+                targetEverestPerHead: parseFloat(targetEverestPerHead) || 0,
+                totalSales,
+                salesDifference,
+                salesPercentage,
+                everestPerBill,
+                everestPerBillDifference,
+                everestPerBillPercentage,
+                everestPerHead,
+                everestPerHeadDifference,
+                everestPerHeadPercentage,
+                timestamp: new Date(), // When the record was last updated
+            });
+            setMessage({ type: 'success', text: 'บันทึกข้อมูลยอดขายเรียบร้อยแล้ว!' });
+            // Optionally clear form or reset state
+            // setDate(formattedToday);
+            // setBranch(branches[0]);
+            // setTargetSales('');
+            // ... and so on for all fields
+        } catch (err) {
+            console.error("Error saving sales data:", err);
+            setMessage({ type: 'error', text: `เกิดข้อผิดพลาดในการบันทึก: ${err.message}` });
+        }
+    };
+
+    // Input field component for consistency
+    const InputField = ({ label, type = 'text', value, onChange, placeholder = '', unit = '' }) => (
+        <div className="mb-4">
+            <label className="block text-gray-700 text-sm font-medium mb-1">{label}</label>
+            <div className="flex items-center">
+                <input
+                    type={type}
+                    value={value}
+                    onChange={(e) => onChange(e.target.value)}
+                    className="flex-1 p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition duration-150 ease-in-out shadow-sm"
+                    placeholder={placeholder}
+                />
+                {unit && <span className="ml-2 text-gray-500 text-sm">{unit}</span>}
+            </div>
+        </div>
+    );
+
+    // Display message for a short period
+    useEffect(() => {
+        if (message.text) {
+            const timer = setTimeout(() => {
+                setMessage({ type: '', text: '' });
+            }, 5000); // Clear message after 5 seconds
+            return () => clearTimeout(timer);
+        }
+    }, [message]);
+
+    return (
+        <div className="p-6 bg-white rounded-lg shadow-md mt-4">
+            <h2 className="text-xl font-bold text-gray-800 mb-6">ลงข้อมูลยอดขายรายวัน</h2>
+
+            {message.text && (
+                <div className={`p-3 mb-4 rounded-lg text-sm ${message.type === 'success' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                    {message.text}
+                </div>
+            )}
+
+            <form onSubmit={handleSave}>
+                <InputField label="วันที่" type="date" value={date} onChange={setDate} />
+
+                <div className="mb-4">
+                    <label className="block text-gray-700 text-sm font-medium mb-1">สาขา</label>
+                    <select
+                        value={branch}
+                        onChange={(e) => setBranch(e.target.value)}
+                        className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition duration-150 ease-in-out shadow-sm"
+                    >
+                        {branches.map((b, i) => (
+                            <option key={i} value={b}>{b}</option>
+                        ))}
+                    </select>
+                </div>
+
+                <InputField label="Target Sales (เป้ายอดขาย)" type="number" value={targetSales} onChange={setTargetSales} placeholder="0" unit="บาท" />
+
+                <h3 className="text-lg font-semibold text-gray-800 mt-6 mb-4">ยอดขายรายวัน (บาท)</h3>
+                <InputField label="ยอดขายหน้าสาขา" type="number" value={inStoreSales} onChange={setInStoreSales} placeholder="0" unit="บาท" />
+                <InputField label="ยอดขาย T/A" type="number" value={taSales} onChange={setTaSales} placeholder="0" unit="บาท" />
+                <div className="pl-4 border-l-2 border-gray-200 ml-2">
+                    <h4 className="text-md font-medium text-gray-700 mb-2">ยอดขาย Delivery</h4>
+                    <InputField label="Grab" type="number" value={grabSales} onChange={setGrabSales} placeholder="0" unit="บาท" />
+                    <InputField label="Line Man" type="number" value={lineManSales} onChange={setLineManSales} placeholder="0" unit="บาท" />
+                </div>
+
+                <div className="bg-blue-50 p-4 rounded-lg mt-6 shadow-inner">
+                    <h3 className="text-lg font-semibold text-blue-700 mb-3">สรุปยอดขาย</h3>
+                    <p className="text-gray-700 mb-2">ยอดขายรวม: <span className="font-bold text-xl text-blue-800">{totalSales.toLocaleString()}</span> บาท</p>
+                    <p className="text-gray-700 mb-2">ส่วนต่างจาก Target: <span className={`font-bold ${salesDifference >= 0 ? 'text-green-600' : 'text-red-600'}`}>{salesDifference.toLocaleString()}</span> บาท</p>
+                    <p className="text-gray-700">เปอร์เซ็นต์ส่วนต่าง: <span className={`font-bold ${salesPercentage >= 0 ? 'text-green-600' : 'text-red-600'}`}>{salesPercentage.toFixed(2)}</span> %</p>
+                </div>
+
+                <h3 className="text-lg font-semibold text-gray-800 mt-6 mb-4">ข้อมูลเพิ่มเติม</h3>
+                <InputField label="จำนวนบิล" type="number" value={numBills} onChange={setNumBills} placeholder="0" unit="บิล" />
+                <InputField label="Target Everest Per Bill (เป้าเฉลี่ยต่อบิล)" type="number" value={targetEverestPerBill} onChange={setTargetEverestPerBill} placeholder="0" unit="บาท/บิล" />
+                <div className="bg-purple-50 p-4 rounded-lg mt-4 shadow-inner">
+                    <p className="text-gray-700 mb-2">Everest Per Bill (ยอดขายเฉลี่ยต่อบิล): <span className="font-bold text-xl text-purple-800">{everestPerBill.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span> บาท/บิล</p>
+                    <p className="text-gray-700 mb-2">ส่วนต่างจาก Target Per Bill: <span className={`font-bold ${everestPerBillDifference >= 0 ? 'text-green-600' : 'text-red-600'}`}>{everestPerBillDifference.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span> บาท</p>
+                    <p className="text-gray-700">เปอร์เซ็นต์ส่วนต่าง Per Bill: <span className={`font-bold ${everestPerBillPercentage >= 0 ? 'text-green-600' : 'text-red-600'}`}>{everestPerBillPercentage.toFixed(2)}</span> %</p>
+                </div>
+
+                <InputField label="จำนวนลูกค้าที่เข้ามาใช้บริการ" type="number" value={numCustomers} onChange={setNumCustomers} placeholder="0" unit="คน" />
+                <InputField label="Target Everest Per Head (เป้าเฉลี่ยต่อคน)" type="number" value={targetEverestPerHead} onChange={setTargetEverestPerHead} placeholder="0" unit="บาท/คน" />
+                <div className="bg-yellow-50 p-4 rounded-lg mt-4 shadow-inner">
+                    <p className="text-gray-700 mb-2">Everest Per Head (ยอดขายเฉลี่ยต่อคน): <span className="font-bold text-xl text-yellow-800">{everestPerHead.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span> บาท/คน</p>
+                    <p className="text-gray-700 mb-2">ส่วนต่างจาก Target Per Head: <span className={`font-bold ${everestPerHeadDifference >= 0 ? 'text-green-600' : 'text-red-600'}`}>{everestPerHeadDifference.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span> บาท</p>
+                    <p className="text-gray-700">เปอร์เซ็นต์ส่วนต่าง Per Head: <span className={`font-bold ${everestPerHeadPercentage >= 0 ? 'text-green-600' : 'text-red-600'}`}>{everestPerHeadPercentage.toFixed(2)}</span> %</p>
+                </div>
+
+                <button
+                    type="submit"
+                    className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-lg mt-8 transition duration-200 ease-in-out shadow-lg transform hover:scale-105"
+                >
+                    บันทึกข้อมูลยอดขาย
+                </button>
+            </form>
+        </div>
+    );
+};
+
+// Sales Summary Component
+const SalesSummary = ({ salesData }) => {
+    const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth() + 1);
+    const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
+    const [selectedBranch, setSelectedBranch] = useState('All'); // New state for branch filter
+
+    // Generate month and year options
+    const currentYear = new Date().getFullYear();
+    const years = Array.from({ length: 5 }, (_, i) => currentYear - 2 + i); // 2 years back, current, 2 years forward
+    const months = [
+        { value: 1, label: 'มกราคม' }, { value: 2, label: 'กุมภาพันธ์' },
+        { value: 3, label: 'มีนาคม' }, { value: 4, label: 'เมษายน' },
+        { value: 5, label: 'พฤษภาคม' }, { value: 6, label: 'มิถุนายน' },
+        { value: 7, label: 'กรกฎาคม' }, { value: 8, label: 'สิงหาคม' },
+        { value: 9, label: 'กันยายน' }, { value: 10, label: 'ตุลาคม' },
+        { value: 11, label: 'พฤศจิกายน' }, { value: 12, label: 'ธันวาคม' },
+    ];
+
+    // Filter and prepare data for the selected month/year/branch
+    const filteredSalesData = salesData.filter(item => {
+        const itemDate = new Date(item.date);
+        const matchesMonth = itemDate.getMonth() + 1 === selectedMonth;
+        const matchesYear = itemDate.getFullYear() === selectedYear;
+        const matchesBranch = selectedBranch === 'All' || item.branch === selectedBranch;
+        return matchesMonth && matchesYear && matchesBranch;
+    }).sort((a, b) => a.date - b.date); // Sort by date ascending for charts
+
+    // Prepare data for charts
+    const chartData = filteredSalesData.map(item => ({
+        date: item.date.toLocaleDateString('th-TH', { day: 'numeric', month: 'short' }),
+        totalSales: item.totalSales,
+        targetSales: item.targetSales,
+        inStore: item.inStoreSales,
+        ta: item.taSales,
+        grab: item.grabSales,
+        lineMan: item.lineManSales,
+        everestPerBill: item.everestPerBill,
+        everestPerHead: item.everestPerHead,
+    }));
+
+    // Calculate overall monthly summary
+    const monthlyTotalSales = filteredSalesData.reduce((sum, item) => sum + item.totalSales, 0);
+    const monthlyTargetSales = filteredSalesData.reduce((sum, item) => sum + item.targetSales, 0);
+    const monthlySalesDifference = monthlyTotalSales - monthlyTargetSales;
+    const monthlySalesPercentage = monthlyTargetSales !== 0 ? (monthlySalesDifference / monthlyTargetSales) * 100 : 0;
+
+    // Data for sales channel pie chart
+    const pieChartData = [
+        { name: 'หน้าสาขา', value: filteredSalesData.reduce((sum, item) => sum + item.inStoreSales, 0) },
+        { name: 'T/A', value: filteredSalesData.reduce((sum, item) => sum + item.taSales, 0) },
+        { name: 'Grab', value: filteredSalesData.reduce((sum, item) => sum + item.grabSales, 0) },
+        { name: 'Line Man', value: filteredSalesData.reduce((sum, item) => sum + item.lineManSales, 0) },
+    ].filter(item => item.value > 0); // Only show channels with sales
+
+    // Trend Analysis
+    const getTrendAnalysis = useCallback(() => {
+        if (filteredSalesData.length < 2) {
+            return "ไม่สามารถวิเคราะห์แนวโน้มได้เนื่องจากข้อมูลไม่เพียงพอ";
+        }
+
+        const salesValues = filteredSalesData.map(item => item.totalSales);
+        const firstHalfAvg = salesValues.slice(0, Math.floor(salesValues.length / 2)).reduce((a, b) => a + b, 0) / Math.floor(salesValues.length / 2);
+        const secondHalfAvg = salesValues.slice(Math.floor(salesValues.length / 2)).reduce((a, b) => a + b, 0) / (salesValues.length - Math.floor(salesValues.length / 2));
+
+        let trend = "";
+        if (secondHalfAvg > firstHalfAvg * 1.1) {
+            trend = "ยอดขายมีแนวโน้มเพิ่มขึ้นอย่างชัดเจนในช่วงครึ่งหลังของเดือน";
+        } else if (secondHalfAvg < firstHalfAvg * 0.9) {
+            trend = "ยอดขายมีแนวโน้มลดลงในช่วงครึ่งหลังของเดือน";
+        } else {
+            trend = "ยอดขายค่อนข้างคงที่ตลอดทั้งเดือน";
+        }
+
+        const maxSalesDay = filteredSalesData.reduce((max, item) => (item.totalSales > max.totalSales ? item : max), filteredSalesData[0]);
+        const minSalesDay = filteredSalesData.reduce((min, item) => (item.totalSales < min.totalSales ? item : min), filteredSalesData[0]);
+
+        let insights = [];
+        if (monthlySalesPercentage >= 10) {
+            insights.push("ทำยอดขายได้ดีเยี่ยม เกินเป้าหมายอย่างมาก");
+        } else if (monthlySalesPercentage >= 0) {
+            insights.push("ทำยอดขายได้ตามเป้าหมาย");
+        } else if (monthlySalesPercentage >= -10) {
+            insights.push("ยอดขายต่ำกว่าเป้าเล็กน้อย");
+        } else {
+            insights.push("ยอดขายต่ำกว่าเป้าหมายอย่างมีนัยสำคัญ");
+        }
+
+        const inStoreShare = pieChartData.find(d => d.name === 'หน้าสาขา')?.value || 0;
+        const deliveryShare = (pieChartData.find(d => d.name === 'Grab')?.value || 0) + (pieChartData.find(d => d.name === 'Line Man')?.value || 0);
+
+        if (deliveryShare > inStoreShare && deliveryShare > monthlyTotalSales * 0.3) {
+            insights.push("ช่องทาง Delivery มีบทบาทสำคัญและเติบโตได้ดี");
+        } else if (inStoreShare > monthlyTotalSales * 0.5) {
+            insights.push("ยอดขายหน้าร้านยังคงเป็นช่องทางหลัก");
+        }
+
+        return `${trend}. ${insights.join(". ")}. วันที่มียอดขายสูงสุดคือ ${maxSalesDay.date.toLocaleDateString('th-TH')} (${maxSalesDay.totalSales.toLocaleString()} บาท) และต่ำสุดคือ ${minSalesDay.date.toLocaleDateString('th-TH')} (${minSalesDay.totalSales.toLocaleString()} บาท).`;
+    }, [filteredSalesData, monthlyTotalSales, monthlySalesPercentage, pieChartData]);
+
+    return (
+        <div className="p-6 bg-white rounded-lg shadow-md mt-4">
+            <h2 className="text-xl font-bold text-gray-800 mb-6">สรุปยอดขายรายเดือน</h2>
+
+            {/* Month/Year and Branch Selector */}
+            <div className="flex flex-wrap gap-4 mb-6 items-center">
+                <div>
+                    <label className="block text-gray-700 text-sm font-medium mb-1">เลือกเดือน:</label>
+                    <select
+                        value={selectedMonth}
+                        onChange={(e) => setSelectedMonth(parseInt(e.target.value))}
+                        className="p-2 border border-gray-300 rounded-lg shadow-sm"
+                    >
+                        {months.map(m => (
+                            <option key={m.value} value={m.value}>{m.label}</option>
+                        ))}
+                    </select>
+                </div>
+                <div>
+                    <label className="block text-gray-700 text-sm font-medium mb-1">เลือกปี:</label>
+                    <select
+                        value={selectedYear}
+                        onChange={(e) => setSelectedYear(parseInt(e.target.value))}
+                        className="p-2 border border-gray-300 rounded-lg shadow-sm"
+                    >
+                        {years.map(y => (
+                            <option key={y} value={y}>{y}</option>
+                        ))}
+                    </select>
+                </div>
+                <div>
+                    <label className="block text-gray-700 text-sm font-medium mb-1">เลือกสาขา:</label>
+                    <select
+                        value={selectedBranch}
+                        onChange={(e) => setSelectedBranch(e.target.value)}
+                        className="p-2 border border-gray-300 rounded-lg shadow-sm"
+                    >
+                        <option value="All">ทุกสาขา</option>
+                        {branches.map((b, i) => (
+                            <option key={i} value={b}>{b}</option>
+                        ))}
+                    </select>
+                </div>
+            </div>
+
+            {filteredSalesData.length === 0 ? (
+                <div className="text-center text-gray-500 p-8">
+                    <p>ไม่มีข้อมูลยอดขายสำหรับเดือนและสาขาที่เลือก</p>
+                    <p>กรุณาเพิ่มข้อมูลในหน้า "ลงข้อมูลยอดขาย" ก่อน</p>
+                </div>
+            ) : (
+                <>
+                    {/* Overall Monthly Summary */}
+                    <div className="bg-blue-50 p-4 rounded-lg mb-6 shadow-inner">
+                        <h3 className="text-lg font-semibold text-blue-700 mb-3">สรุปยอดขายรวมประจำเดือน</h3>
+                        <p className="text-gray-700 mb-2">ยอดขายรวม: <span className="font-bold text-xl text-blue-800">{monthlyTotalSales.toLocaleString()}</span> บาท</p>
+                        <p className="text-gray-700 mb-2">เป้าหมายรวม: <span className="font-bold text-lg">{monthlyTargetSales.toLocaleString()}</span> บาท</p>
+                        <p className="text-gray-700 mb-2">ส่วนต่างจากเป้า: <span className={`font-bold ${monthlySalesDifference >= 0 ? 'text-green-600' : 'text-red-600'}`}>{monthlySalesDifference.toLocaleString()}</span> บาท</p>
+                        <p className="text-gray-700">เปอร์เซ็นต์ส่วนต่าง: <span className={`font-bold ${monthlySalesPercentage >= 0 ? 'text-green-600' : 'text-red-600'}`}>{monthlySalesPercentage.toFixed(2)}</span> %</p>
+                    </div>
+
+                    {/* Sales Trend Chart */}
+                    <div className="bg-gray-50 p-4 rounded-lg shadow-sm mb-6">
+                        <h3 className="text-lg font-semibold text-gray-800 mb-4">ยอดขายรวมรายวัน vs. เป้าหมายรายวัน</h3>
+                        <ResponsiveContainer width="100%" height={300}>
+                            <BarChart data={chartData} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
+                                <CartesianGrid strokeDasharray="3 3" stroke="#e0e0e0" />
+                                <XAxis dataKey="date" stroke="#555" />
+                                <YAxis stroke="#555" />
+                                <Tooltip formatter={(value) => `${value.toLocaleString()} บาท`} />
+                                <Legend />
+                                <Bar dataKey="totalSales" name="ยอดขายรวม" fill="#8884d8" radius={[10, 10, 0, 0]} />
+                                <Bar dataKey="targetSales" name="เป้าหมาย" fill="#82ca9d" radius={[10, 10, 0, 0]} />
+                            </BarChart>
+                        </ResponsiveContainer>
+                    </div>
+
+                    {/* Sales Channels Pie Chart */}
+                    <div className="bg-gray-50 p-4 rounded-lg shadow-sm mb-6">
+                        <h3 className="text-lg font-semibold text-gray-800 mb-4">สัดส่วนยอดขายตามช่องทาง</h3>
+                        <ResponsiveContainer width="100%" height={300}>
+                            <PieChart>
+                                <Pie
+                                    data={pieChartData}
+                                    cx="50%"
+                                    cy="50%"
+                                    labelLine={false}
+                                    outerRadius={100}
+                                    fill="#8884d8"
+                                    dataKey="value"
+                                    label={({ name, percent }) => `${name}: ${(percent * 100).toFixed(0)}%`}
+                                >
+                                    {pieChartData.map((entry, index) => (
+                                        <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                                    ))}
+                                </Pie>
+                                <Tooltip formatter={(value) => `${value.toLocaleString()} บาท`} />
+                                <Legend />
+                            </PieChart>
+                        </ResponsiveContainer>
+                    </div>
+
+                    {/* Everest Per Bill/Per Head Trend Chart */}
+                    <div className="bg-gray-50 p-4 rounded-lg shadow-sm mb-6">
+                        <h3 className="text-lg font-semibold text-gray-800 mb-4">แนวโน้ม Everest Per Bill / Per Head</h3>
+                        <ResponsiveContainer width="100%" height={300}>
+                            <LineChart data={chartData} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
+                                <CartesianGrid strokeDasharray="3 3" stroke="#e0e0e0" />
+                                <XAxis dataKey="date" stroke="#555" />
+                                <YAxis stroke="#555" />
+                                <Tooltip formatter={(value) => `${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} บาท`} />
+                                <Legend />
+                                <Line type="monotone" dataKey="everestPerBill" name="Everest Per Bill" stroke="#ffc658" activeDot={{ r: 8 }} />
+                                <Line type="monotone" dataKey="everestPerHead" name="Everest Per Head" stroke="#ff8042" activeDot={{ r: 8 }} />
+                            </LineChart>
+                        </ResponsiveContainer>
+                    </div>
+
+                    {/* Daily Sales Table */}
+                    <div className="bg-gray-50 p-4 rounded-lg shadow-sm mb-6 overflow-x-auto">
+                        <h3 className="text-lg font-semibold text-gray-800 mb-4">ตารางสรุปยอดขายรายวัน</h3>
+                        <table className="min-w-full bg-white rounded-lg overflow-hidden shadow-sm">
+                            <thead className="bg-gray-100 border-b border-gray-200">
+                                <tr>
+                                    <th className="py-3 px-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">วันที่</th>
+                                    <th className="py-3 px-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">สาขา</th>
+                                    <th className="py-3 px-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">ยอดขายรวม</th>
+                                    <th className="py-3 px-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">Target</th>
+                                    <th className="py-3 px-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">ส่วนต่าง (%)</th>
+                                    <th className="py-3 px-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">บิล</th>
+                                    <th className="py-3 px-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">EPB</th>
+                                    <th className="py-3 px-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">ลูกค้า</th>
+                                    <th className="py-3 px-4 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">EPH</th>
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y divide-gray-200">
+                                {filteredSalesData.map(item => (
+                                    <tr key={item.id} className="hover:bg-gray-50">
+                                        <td className="py-3 px-4 whitespace-nowrap text-sm text-gray-800">{item.date.toLocaleDateString('th-TH')}</td>
+                                        <td className="py-3 px-4 whitespace-nowrap text-sm text-gray-800">{item.branch}</td>
+                                        <td className="py-3 px-4 whitespace-nowrap text-sm text-gray-800">{item.totalSales.toLocaleString()}</td>
+                                        <td className="py-3 px-4 whitespace-nowrap text-sm text-gray-800">{item.targetSales.toLocaleString()}</td>
+                                        <td className={`py-3 px-4 whitespace-nowrap text-sm ${item.salesPercentage >= 0 ? 'text-green-600' : 'text-red-600'}`}>{item.salesPercentage.toFixed(2)}%</td>
+                                        <td className="py-3 px-4 whitespace-nowrap text-sm text-gray-800">{item.numBills.toLocaleString()}</td>
+                                        <td className="py-3 px-4 whitespace-nowrap text-sm text-gray-800">{item.everestPerBill.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}</td>
+                                        <td className="py-3 px-4 whitespace-nowrap text-sm text-gray-800">{item.numCustomers.toLocaleString()}</td>
+                                        <td className="py-3 px-4 whitespace-nowrap text-sm text-gray-800">{item.everestPerHead.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+
+                    {/* Trend Analysis Section */}
+                    <div className="bg-blue-50 p-4 rounded-lg shadow-inner">
+                        <h3 className="text-lg font-semibold text-blue-700 mb-3">การวิเคราะห์แนวโน้มยอดขาย</h3>
+                        <p className="text-gray-700 text-sm leading-relaxed">
+                            {getTrendAnalysis()}
+                        </p>
+                    </div>
+                </>
+            )}
+        </div>
+    );
+};
+
+export default App;
